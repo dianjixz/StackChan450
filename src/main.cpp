@@ -87,7 +87,7 @@ public:
             lvgl_loop();
         }
     }
-    void Lvgl_tasks_init()
+    void Lvgl_tasks_work()
     {
         lvgl_setup();
         xTaskCreate(example_lvgl_port_task, "LVGL", 8 * 1024, this, 2, &task_lvgl_handle);
@@ -101,28 +101,22 @@ public:
 #define S_TXD       (6)    // TXD_PIN
 #define PWR_EN      (13)   // PWR_EN_PIN
 #define SERVO_SPEED (800)  // 舵机转动速度
-
+#define SERVO_LEN   (2)
 class Slave_tasks {
 private:
+    TaskHandle_t task_slave_handle;
     QueueHandle_t Slave_Queue;
-    uint8_t x_min_angle[2];
-    uint8_t x_max_angle[2];
-    uint8_t y_min_angle[2];
-    uint8_t y_max_angle[2];
     SCSCL sc;
 
 public:
-    int mappedX;
-    int mappedY;
     struct Slave_msg {
-        uint8_t cmd;
-        union {
-            struct {
-                uint16_t x;
-                uint16_t y;
-            } posie;
-            uint8_t rgb[4];
-        };
+        u32 cmd;
+        struct {
+            u8 ID;
+            u16 Position;
+            u16 Time;
+            u16 Speed;
+        } pos[SERVO_LEN];
     };
 
     Slave_tasks(/* args */)
@@ -132,23 +126,29 @@ public:
         digitalWrite(PWR_EN, HIGH);
         Serial1.begin(1000000, SERIAL_8N1, S_RXD, S_TXD);
         sc.pSerial = &Serial1;
-        for (int i = 0; i < 2; i++) {
-            x_min_angle[i] = sc.readByte(1, SCSCL_MIN_ANGLE_LIMIT_L + i);
-            x_max_angle[i] = sc.readByte(1, SCSCL_MAX_ANGLE_LIMIT_L + i);
-        }
     }
     void push(struct Slave_msg &msg)
     {
         xQueueSend(Slave_Queue, &msg, 0);
     }
-    void update()
+    static void update(void *arg)
     {
+        Slave_tasks *self = (Slave_tasks *)arg;
         struct Slave_msg msg;
-        if (xQueueReceive(Slave_Queue, &msg, 0)) {
-            // todo:
-            sc.WritePos(1, mappedX, 0, SERVO_SPEED);
-            sc.WritePos(2, mappedY, 0, SERVO_SPEED);
+        for (;;) {
+            if (xQueueReceive(self->Slave_Queue, &msg, 0)) {
+                // todo:
+                for (int i = 0; i < SERVO_LEN; i++) {
+                    if (msg.cmd & (1 << i))
+                        self->sc.RegWritePos(msg.pos[i].ID, msg.pos[i].Position, msg.pos[i].Speed, msg.pos[i].Time);
+                }
+                self->sc.RegWriteAction();
+            }
         }
+    }
+    void Slave_tasks_work()
+    {
+        xTaskCreate(update, "Slave", 4 * 1024, this, 2, &task_slave_handle);
     }
     ~Slave_tasks()
     {
@@ -177,7 +177,8 @@ void setup()
     M5.Display.setColorDepth(16);
     M5.Display.setBrightness(70);
 
-    Lvgl_task.Lvgl_tasks_init();
+    Lvgl_task.Lvgl_tasks_work();
+    Slave_task.Slave_tasks_work();
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
@@ -188,5 +189,4 @@ void setup()
 void loop()
 {
     // esp_task_wdt_reset();
-    Slave_task.update();
 }
